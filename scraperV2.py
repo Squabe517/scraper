@@ -21,13 +21,11 @@ Description:
 """
 
 # List of base URLs to start scraping from.
-# NOTE: Ensure that each URL in this list is separated by a comma. Missing commas can lead to
-#       unintended string concatenation.
 BASE_URLS = [
     "https://python.langchain.com/api_reference/core/",
     "https://python.langchain.com/api_reference/langchain/",
-    "https://python.langchain.com/api_reference/text_splitters/",  # Added missing comma
-    "https://python.langchain.com/api_reference/community/",       # Added missing comma
+    "https://python.langchain.com/api_reference/text_splitters/", 
+    "https://python.langchain.com/api_reference/community/",       
     "https://python.langchain.com/api_reference/experimental/"
 ]
 
@@ -209,7 +207,7 @@ if __name__ == "__main__":
         for text in output:
             f.write(f"=====================\n\n=== {text} ===\n\n======================")
 
-# The following argparse code is commented out.
+# The following argparse code is commented out, but will be implemented in the future.
 # It can be used to add command-line argument parsing for custom URL, output file, recursion depth, etc.
 #
 # parser = argparse.ArgumentParser(description="Web Scraper")
