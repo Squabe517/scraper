@@ -8,6 +8,7 @@ import aiohttp
 import asyncio
 import os
 from playwright.async_api import async_playwright
+from typing import List, Dict, Any
 
 """
 Module: Asynchronous Web Scraper
@@ -97,22 +98,61 @@ async def map_urls(urls):
     return mapped_urls
 
 
-async def scrape_url(url):
+async def scrape_url(url: str) -> dict:
     """
-    Asynchronously scrape the textual content from a URL.
+    Asynchronously scrape and semantically structure textual content from a URL.
+
+    The function fetches the HTML content from the given URL and then parses it using Beautiful Soup
+    with the "lxml" parser. It extracts and organizes key semantic elements:
+      - title: The text inside the <title> tag.
+      - meta: A dictionary of meta tag content (e.g., description, keywords).
+      - headings: A list of texts from heading tags (<h1> through <h6>).
+      - content: The main textual content from the <body> tag.
 
     Args:
         url (str): The URL to scrape.
 
     Returns:
-        str: The scraped text from the page.
+        dict: A dictionary with keys 'title', 'meta', 'headings', and 'content'.
+              Returns an empty dict if the URL could not be fetched.
     """
     html = await fetch(url)
     if not html:
-        return ""
+        return {}
+
     soup = BeautifulSoup(html, "lxml")
-    # Get all text from the page, separated by newlines and stripped of extra whitespace.
-    return soup.get_text(separator="\n", strip=True)
+    result = {}
+
+    # Extract the page title.
+    result["title"] = soup.title.string.strip() if soup.title and soup.title.string else ""
+
+    # Extract meta tags into a dictionary.
+    meta_tags = {}
+    for meta in soup.find_all("meta"):
+        # Check for both 'name' and 'property' attributes.
+        key = meta.get("name") or meta.get("property")
+        if key:
+            content = meta.get("content", "").strip()
+            meta_tags[key] = content
+    result["meta"] = meta_tags
+
+    # Extract headings (h1 through h6) into a list.
+    headings = []
+    for level in range(1, 7):
+        for header in soup.find_all(f"h{level}"):
+            text = header.get_text(strip=True)
+            if text:
+                headings.append(text)
+    result["headings"] = headings
+
+    # Extract the main textual content from the <body> (fallback to entire document if <body> is absent).
+    body = soup.body
+    if body:
+        result["content"] = body.get_text(separator="\n", strip=True)
+    else:
+        result["content"] = soup.get_text(separator="\n", strip=True)
+
+    return result
 
 
 async def fetch_with_playwright(url):
@@ -207,6 +247,39 @@ async def scrapeSite(urls, num_workers=5):
         
     return results
 
+import json
+from typing import List, Dict, Any
+
+def export_results_to_jsonl(results: List[Dict[str, Any]], output_file_path: str = "output.jsonl") -> None:
+    """
+    Exports a list of result dictionaries to a JSON Lines file with semantic structure.
+
+    Each result is expected to have keys such as 'title', 'content', and 'metadata'.
+    A unique chunk_id is added for each result.
+
+    Args:
+        results (List[Dict[str, Any]]): A list of dictionaries containing result data.
+        output_file_path (str): The path of the output JSON Lines file.
+
+    Returns:
+        None
+    """
+    structured_results = []
+    for idx, result in enumerate(results):
+        structured_chunk = {
+            "chunk_id": idx,                     # Unique identifier for this chunk
+            "title": result.get("title", ""),    # Title or heading, if available
+            "content": result.get("content", ""),# Main textual content
+            "metadata": result.get("metadata", {}) # Additional semantic metadata
+        }
+        structured_results.append(structured_chunk)
+
+    # Write each structured chunk as a separate JSON object per line.
+    with open(output_file_path, "w", encoding="utf-8") as file:
+        for chunk in structured_results:
+            file.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+
+
 
 async def main():
     """
@@ -221,9 +294,8 @@ async def main():
     # Scrape the content from the collected mapped URLs.
     results = await scrapeSite(urls)
     
-    with open("output.txt", "w", encoding="utf-8") as file:
-        for result in results:
-            file.write(result + "\n")
+    # Export the scraped results to a JSON Lines file.
+    export_results_to_jsonl(results, "output.jsonl")
     
 asyncio.run(main())
 
