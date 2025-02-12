@@ -1,4 +1,3 @@
-import requests
 import time
 import random
 import argparse
@@ -29,11 +28,8 @@ BASE_URLS = [
     "https://python.langchain.com/api_reference/experimental/"
 ]
 
-# Global sets and list to store discovered URLs and scraped output.
-mapped_urls = set()
-visited_urls = set()
-output = []
 
+# Global sets and list to store discovered URLs and scraped output.
 
 async def fetch(url):
     """
@@ -59,22 +55,46 @@ async def fetch(url):
         print(f"Unexpected error: {e}")
 
 
-async def map_urls(url):
+async def map_url(url):
+    mapped_urls = set()
     """
     Fetch the HTML content of the provided URL, parse it, and map all hyperlinks into the global mapped_urls set.
 
     Args:
         url (str): The base URL to parse for hyperlinks.
     """
+    
     html = await fetch(url)
     if not html:
         return  # Exit if no content was retrieved
     soup = BeautifulSoup(html, "lxml")
     
-    # Extract and store URLs from all anchor tags with an href attribute.
+    # Extract and store URLs from all anchor tags with a href attribute.
     for link in soup.find_all("a", href=True):
         # Combine the base URL with the link's href.
+        print(f'{url}{link["href"]}')
         mapped_urls.add(f'{url}{link["href"]}')
+        
+    return mapped_urls
+
+async def map_urls(urls):
+    """
+    Map all URLs from the provided base URL by scanning the page content.
+
+    Args:
+        url (str): The base URL to scan for hyperlinks.
+
+    Returns:
+        set: A set of mapped URLs from the page.
+    """
+    mapped_urls = set()
+    tasks = [map_url(url) for url in urls]
+    results = await asyncio.gather(*tasks)
+
+    for result in results:
+        for url in result:
+            mapped_urls.add(url)
+    return mapped_urls
 
 
 async def scrape_url(url):
@@ -142,7 +162,7 @@ async def check_static_dynamic(url):
         print(f"{url} is STATIC (No JavaScript modification)")
 
 
-async def worker(queue):
+async def worker(queue, results):
     """
     Worker coroutine that processes URLs from an asyncio queue.
 
@@ -155,10 +175,9 @@ async def worker(queue):
     while not queue.empty():
         url = await queue.get()
         scraped_text = await scrape_url(url)
-        print(f"Scraped {url}: {scraped_text[:100]}...\n\n")
-        output.append(scraped_text)
+        results.append(scraped_text)
         queue.task_done()
-
+    return results
 
 async def scrapeSite(urls, num_workers=5):
     """
@@ -169,18 +188,24 @@ async def scrapeSite(urls, num_workers=5):
         num_workers (int, optional): Number of concurrent worker tasks. Defaults to 5.
     """
     queue = asyncio.Queue()
+    results = []
 
     # Enqueue all URLs.
-    for url in urls:
-        await queue.put(url)
+    if isinstance(urls, str):
+        await queue.put(urls)
+    else: 
+        for url in urls:
+            await queue.put(url)
 
     # Create worker tasks.
-    workers = [asyncio.create_task(worker(queue)) for _ in range(num_workers)]
+    workers = [asyncio.create_task(worker(queue, results)) for _ in range(num_workers)]
     # Wait until all queued tasks are completed.
     await queue.join()
     # Cancel any remaining worker tasks.
     for task in workers:
         task.cancel()
+        
+    return results
 
 
 async def main():
@@ -191,21 +216,22 @@ async def main():
     - Initiates scraping of all collected URLs.
     """
     # Map URLs from each base URL concurrently.
-    tasks = [map_urls(url) for url in BASE_URLS]
-    await asyncio.gather(*tasks)
+    urls = await map_urls(BASE_URLS)
 
     # Scrape the content from the collected mapped URLs.
-    await scrapeSite(mapped_urls)
+    results = await scrapeSite(urls)
     
+    with open("output.txt", "w", encoding="utf-8") as file:
+        for result in results:
+            file.write(result + "\n")
+    
+asyncio.run(main())
 
-if __name__ == "__main__":
     # Run the main asynchronous routine.
-    asyncio.run(main())
+
 
     # Write the scraped output to an output file.
-    with open("output.txt", "w", encoding="utf-8") as f:
-        for text in output:
-            f.write(f"=====================\n\n=== {text} ===\n\n======================")
+    
 
 # The following argparse code is commented out, but will be implemented in the future.
 # It can be used to add command-line argument parsing for custom URL, output file, recursion depth, etc.
