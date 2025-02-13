@@ -8,6 +8,7 @@ import aiohttp
 import asyncio
 import os
 from playwright.async_api import async_playwright
+import json
 from typing import List, Dict, Any
 
 """
@@ -32,7 +33,11 @@ BASE_URLS = [
 
 # Global sets and list to store discovered URLs and scraped output.
 
-async def fetch(url):
+class BaseHttpClient:
+    def fetch(self, url: str) -> str:
+        pass
+
+async def fetch(session, url):
     """
     Asynchronously fetch the content of the given URL.
 
@@ -43,9 +48,8 @@ async def fetch(url):
         str: The HTML content of the page if successful; otherwise, None.
     """
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                return await response.text()
+        async with session.get(url) as response:
+            return await response.text()
     except asyncio.TimeoutError:
         print(f"Timeout error while fetching {url}")
     except aiohttp.ClientResponseError as e:
@@ -56,103 +60,123 @@ async def fetch(url):
         print(f"Unexpected error: {e}")
 
 
-async def map_url(url):
-    mapped_urls = set()
-    """
-    Fetch the HTML content of the provided URL, parse it, and map all hyperlinks into the global mapped_urls set.
+class LinkExtractor:
+    def __init__(self, urls):
+        """Constructor (runs synchronously)"""
+        self.urls = urls
+        self.session = None  # Will be set up in async context
 
-    Args:
-        url (str): The base URL to parse for hyperlinks.
-    """
-    
-    html = await fetch(url)
-    if not html:
-        return  # Exit if no content was retrieved
-    soup = BeautifulSoup(html, "lxml")
-    
-    # Extract and store URLs from all anchor tags with a href attribute.
-    for link in soup.find_all("a", href=True):
-        # Combine the base URL with the link's href.
-        print(f'{url}{link["href"]}')
-        mapped_urls.add(f'{url}{link["href"]}')
+    async def __aenter__(self):
+        """Executed when entering 'async with'"""
+        self.session = aiohttp.ClientSession()  # Open the session
+        print("Session started")
+        return self  # Return instance so it can be used in 'async with'
+
+    async def __aexit__(self, exc_type, exc, tb):
+        """Executed when exiting 'async with' (cleanup)"""
+        await self.session.close()  # Ensure session is closed
+        print("Session closed")
         
-    return mapped_urls
+    async def map_urls(self, urls):
+        """Map URLs from the given URL"""
+        mapped_urls = set()
 
-async def map_urls(urls):
-    """
-    Map all URLs from the provided base URL by scanning the page content.
+        if isinstance(urls, str):
+            urls = [urls]
+        
+        html_pages = await asyncio.gather(*[fetch(self.session, url) for url in urls])
+        
+        tasks = [
+            asyncio.to_thread(self.extract_links, html, base_url)
+            for html, base_url in zip(html_pages, urls) if html
+        ]
 
-    Args:
-        url (str): The base URL to scan for hyperlinks.
+        results = await asyncio.gather(*tasks)
+        
+        for result in results:
+            mapped_urls.update(result)
+        return mapped_urls
+    def extract_links(self, html: str, base_url: str) -> set[str]:
+        """Extract links from HTML content"""
+        soup = BeautifulSoup(html, "lxml")
+        links = set()
+        for link in soup.find_all("a", href=True):
+            links.add(urljoin(base_url, link["href"]))
+        return links
+    
+class ContentExtractor:
+    def __init__(self, urls):
+        """Constructor (runs synchronously)"""
+        self.urls = urls
+        self.session = None  # Will be set up in async context
 
-    Returns:
-        set: A set of mapped URLs from the page.
-    """
-    mapped_urls = set()
-    tasks = [map_url(url) for url in urls]
-    results = await asyncio.gather(*tasks)
+    async def __aenter__(self):
+        """Executed when entering 'async with'"""
+        self.session = aiohttp.ClientSession()  # Open the session
+        print("Session started")
+        return self  # Return instance so it can be used in 'async with'
 
-    for result in results:
-        for url in result:
-            mapped_urls.add(url)
-    return mapped_urls
+    async def __aexit__(self, exc_type, exc, tb):
+        """Executed when exiting 'async with' (cleanup)"""
+        await self.session.close()  # Ensure session is closed
+        print("Session closed")
+        
+    async def scrape_urls(self, urls):
+        """Scrape URLs from the given URL"""
+        scraped_content = set()
 
+        if isinstance(urls, str):
+            urls = [urls]
+        
+        html_pages = await asyncio.gather(*[fetch(self.session, url) for url in urls])
+        
+        tasks = [
+            asyncio.to_thread(self._scrape_url, html)
+            for html, base_url in zip(html_pages, urls) if html
+        ]
 
-async def scrape_url(url: str) -> dict:
-    """
-    Asynchronously scrape and semantically structure textual content from a URL.
+        results = await asyncio.gather(*tasks)
+        
+        for result in results:
+            scraped_content.update(result)
+        return scraped_content
+    
+        
+    def _scrape_url(self, html: str) -> dict:
+        """Scrape content from HTML"""
+        soup = BeautifulSoup(html, "lxml")
+        result = {}
 
-    The function fetches the HTML content from the given URL and then parses it using Beautiful Soup
-    with the "lxml" parser. It extracts and organizes key semantic elements:
-      - title: The text inside the <title> tag.
-      - meta: A dictionary of meta tag content (e.g., description, keywords).
-      - headings: A list of texts from heading tags (<h1> through <h6>).
-      - content: The main textual content from the <body> tag.
+        # Extract the page title.
+        result["title"] = soup.title.string.strip() if soup.title and soup.title.string else ""
 
-    Args:
-        url (str): The URL to scrape.
+        # Extract meta tags into a dictionary.
+        meta_tags = {}
+        for meta in soup.find_all("meta"):
+            # Check for both 'name' and 'property' attributes.
+            key = meta.get("name") or meta.get("property")
+            if key:
+                content = meta.get("content", "").strip()
+                meta_tags[key] = content
+        result["meta"] = meta_tags
 
-    Returns:
-        dict: A dictionary with keys 'title', 'meta', 'headings', and 'content'.
-              Returns an empty dict if the URL could not be fetched.
-    """
-    html = await fetch(url)
-    if not html:
-        return {}
+        # Extract headings (h1 through h6) into a list.
+        headings = []
+        for level in range(1, 7):
+            for header in soup.find_all(f"h{level}"):
+                text = header.get_text(strip=True)
+                if text:
+                    headings.append(text)
+        result["headings"] = headings
 
-    soup = BeautifulSoup(html, "lxml")
-    result = {}
+        # Extract the main textual content from the <body> (fallback to entire document if <body> is absent).
+        body = soup.body
+        if body:
+            result["content"] = body.get_text(separator="\n", strip=True)
+        else:
+            result["content"] = soup.get_text(separator="\n", strip=True)
 
-    # Extract the page title.
-    result["title"] = soup.title.string.strip() if soup.title and soup.title.string else ""
-
-    # Extract meta tags into a dictionary.
-    meta_tags = {}
-    for meta in soup.find_all("meta"):
-        # Check for both 'name' and 'property' attributes.
-        key = meta.get("name") or meta.get("property")
-        if key:
-            content = meta.get("content", "").strip()
-            meta_tags[key] = content
-    result["meta"] = meta_tags
-
-    # Extract headings (h1 through h6) into a list.
-    headings = []
-    for level in range(1, 7):
-        for header in soup.find_all(f"h{level}"):
-            text = header.get_text(strip=True)
-            if text:
-                headings.append(text)
-    result["headings"] = headings
-
-    # Extract the main textual content from the <body> (fallback to entire document if <body> is absent).
-    body = soup.body
-    if body:
-        result["content"] = body.get_text(separator="\n", strip=True)
-    else:
-        result["content"] = soup.get_text(separator="\n", strip=True)
-
-    return result
+        return result
 
 
 async def fetch_with_playwright(url):
@@ -179,7 +203,6 @@ async def fetch_with_playwright(url):
     except Exception as e:
         return f"Playwright failed: {e}"
 
-
 async def check_static_dynamic(url):
     """
     Compare raw HTML with JavaScript-rendered HTML to determine if a page is dynamic.
@@ -200,55 +223,6 @@ async def check_static_dynamic(url):
         print(f"{url} is DYNAMIC (JavaScript modifies content)")
     else:
         print(f"{url} is STATIC (No JavaScript modification)")
-
-
-async def worker(queue, results):
-    """
-    Worker coroutine that processes URLs from an asyncio queue.
-
-    For each URL, the worker scrapes the textual content and appends it to the global output list.
-    It also prints a preview of the scraped content.
-
-    Args:
-        queue (asyncio.Queue): Queue containing URLs to process.
-    """
-    while not queue.empty():
-        url = await queue.get()
-        scraped_text = await scrape_url(url)
-        results.append(scraped_text)
-        queue.task_done()
-    return results
-
-async def scrapeSite(urls, num_workers=5):
-    """
-    Process a collection of URLs concurrently using worker coroutines.
-
-    Args:
-        urls (iterable): A collection of URLs to scrape.
-        num_workers (int, optional): Number of concurrent worker tasks. Defaults to 5.
-    """
-    queue = asyncio.Queue()
-    results = []
-
-    # Enqueue all URLs.
-    if isinstance(urls, str):
-        await queue.put(urls)
-    else: 
-        for url in urls:
-            await queue.put(url)
-
-    # Create worker tasks.
-    workers = [asyncio.create_task(worker(queue, results)) for _ in range(num_workers)]
-    # Wait until all queued tasks are completed.
-    await queue.join()
-    # Cancel any remaining worker tasks.
-    for task in workers:
-        task.cancel()
-        
-    return results
-
-import json
-from typing import List, Dict, Any
 
 def export_results_to_jsonl(results: List[Dict[str, Any]], output_file_path: str = "output.jsonl") -> None:
     """
@@ -279,8 +253,6 @@ def export_results_to_jsonl(results: List[Dict[str, Any]], output_file_path: str
         for chunk in structured_results:
             file.write(json.dumps(chunk, ensure_ascii=False) + "\n")
 
-
-
 async def main():
     """
     Main coroutine to coordinate URL mapping and site scraping.
@@ -288,29 +260,12 @@ async def main():
     - Maps additional URLs by scanning the base pages.
     - Initiates scraping of all collected URLs.
     """
-    # Map URLs from each base URL concurrently.
-    urls = await map_urls(BASE_URLS)
-
-    # Scrape the content from the collected mapped URLs.
-    results = await scrapeSite(urls)
     
-    # Export the scraped results to a JSON Lines file.
-    export_results_to_jsonl(results, "output.jsonl")
+    async with LinkExtractor(BASE_URLS) as extractor:
+        urls = await extractor.map_urls(BASE_URLS)
+        
+    async with ContentExtractor(urls) as extractor:
+        results = await extractor.scrape_urls(urls)
+    
     
 asyncio.run(main())
-
-    # Run the main asynchronous routine.
-
-
-    # Write the scraped output to an output file.
-    
-
-# The following argparse code is commented out, but will be implemented in the future.
-# It can be used to add command-line argument parsing for custom URL, output file, recursion depth, etc.
-#
-# parser = argparse.ArgumentParser(description="Web Scraper")
-# parser.add_argument("url", help="URL to scrape")
-# parser.add_argument("output_file", help="Output file to save scraped text")
-# parser.add_argument("--depth", type=int, default=3, help="Depth of recursion")
-# parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-# args = parser.parse_args()
